@@ -13,15 +13,15 @@ The interface is a sleek, "Ghost Mode" overlay that stays on top of your game wi
 - **Smart Audio Detection**: Automatically identifies active PipeWire sinks and monitors.
 - **History & Scroll**: Keep track of the conversation with a scrollable history.
 
-## 🛠️ Requirements (Arch Linux)
+## 🛠️ Requirements
 
-- **OS**: Arch Linux (or derivatives like CachyOS/Manjaro)
+- **OS**: Arch Linux (CachyOS, Manjaro) and RPM-based systems (Fedora, RHEL, OpenSUSE).
 - **Audio System**: PipeWire
 - **Hardware**: NVIDIA GPU (recommended for CUDA acceleration)
 - **Packages**:
   - `python`
   - `pipewire`, `pipewire-audio`, `pactl`
-  - `piper-tts-bin` (AUR)
+  - `piper-tts` (AUR/Bin)
   - `ffmpeg`
 
 ## 🚀 Installation
