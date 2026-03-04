@@ -9,7 +9,7 @@ The interface is a sleek, "Ghost Mode" overlay that stays on top of your game wi
 - **Conversational Streaming**: Translations appear as people speak, with no long pauses.
 - **Ghost Mode**: Invisible to clicks by default; hold **Shift** to move, resize, or interact.
 - **AI-Powered**: Uses NVIDIA GPU acceleration for near-instant response.
-- **Wolverine Mode (TTS)**: Integration with Piper-TTS to read translations in a customized "Wolverine" voice.
+- **Narração (TTS)**: Integration with Piper-TTS to read translations in a customized narrator voice.
 - **Smart Audio Detection**: Automatically identifies active PipeWire sinks and monitors.
 - **History & Scroll**: Keep track of the conversation with a scrollable history.
 
@@ -52,7 +52,7 @@ chmod +x install.sh
   - **A+ / A-**: Increase/Decrease font size.
   - **V+ / V-**: Increase/Decrease TTS volume.
   - **Linguagens**: Change input/output languages.
-  - **Ouvir**: Trigger Wolverine Voice (TTS) for the last translation.
+  - **Ouvir**: Trigger Narrator Voice (TTS) for the last translation.
   - **Limpar**: Clear history.
 
 ## 🤝 Credits

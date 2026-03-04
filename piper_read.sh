@@ -44,7 +44,7 @@ CLEAN_TEXT=$(echo "$TEXT" | sed 's/[.!?"()#$*+=\/\\_-]//g')
 
 echo "$(date): Iniciando leitura. Velocidade: $SPEED" >> "$LOGFILE"
 
-# Filtro de Voz "Wolverine":
+# Filtro de Voz de Narração:
 # 1. asetrate: Abaixa o tom (0.83 do original) para ficar grosso
 # 2. atempo: Corrige a velocidade para ficar rapida (SPEED)
 # 3. equalizer: Aumenta graves (80Hz) e clareza (4kHz)
