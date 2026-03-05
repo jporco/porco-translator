@@ -33,15 +33,19 @@ cd porco-translator
 ```
 
 ### 2. Run the Installer
-The included `install.sh` will set up the virtual environment and install all Python dependencies.
+The new interactive `install.sh` will ask you where you want to install the application (default is `~/.local/share/porco-translator`). It will set up the virtual environment, install dependencies, and create a Desktop shortcut and an **Uninstaller**.
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
+### 3. Uninstalling
+If you ever want to remove the application, simply run the `uninstall.sh` script located in your installation folder.
+
 ### 3. Run the Translator
+You can run it from your **Application Menu** (search for "Porco Translator") or via terminal:
 ```bash
-./porco_translator.py
+/home/porco/.local/share/porco_translator/venv/bin/python porco_translator.py
 ```
 
 ## 🎮 Controls
@@ -49,10 +53,10 @@ chmod +x install.sh
 - **No Key**: Window is a "ghost" (clicks pass through to the game).
 - **Hold Shift**: 
   - **Yellow Handle**: Drag to move.
-  - **A+ / A-**: Increase/Decrease font size.
-  - **V+ / V-**: Increase/Decrease TTS volume.
-  - **Linguagens**: Change input/output languages.
-  - **Ouvir**: Trigger Narrator Voice (TTS) for the last translation.
+  - **A+ / A-**: Increase/Decrease font size (auto-saved).
+  - **V+ / V-**: Increase/Decrease TTS volume (auto-saved).
+  - **Fonte (Source)**: Select audio input (Microphone or Monitor).
+  - **Ouvir**: Toggle **Real-Time Speech**. When active (Red button), everything translated is spoken automatically.
   - **Limpar**: Clear history.
 
 ## 🤝 Credits
