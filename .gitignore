@@ -1,0 +1,7 @@
+__pycache__/
+*.v13.5
+*_v13.5.py
+venv/
+test_cap.wav
+porco_debug.log
+Porco_JBL_Imersion.json
