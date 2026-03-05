@@ -28,9 +28,15 @@ COLLECT_SECS = 2  # Menor tempo para streaming mais rápido
 def get_installed_langs():
     try:
         langs = argostranslate.translate.get_installed_languages()
-        return [(l.name, l.code) for l in langs]
+        found = []
+        for l in langs:
+            name = l.name
+            if l.code == "pb": name = "Português (Brasil) 🇧🇷"
+            if l.code == "pt": name = "Português (Portugal) 🇵🇹"
+            found.append((name, l.code))
+        return found
     except:
-        return [("English", "en"), ("Portuguese", "pt")]
+        return [("English", "en"), ("Português (Brasil)", "pb")]
 
 def get_best_audio_source():
     try:
@@ -153,7 +159,7 @@ class OverlayWindow(QWidget):
         self._drag_pos = QPoint()
         self.font_size = 18
         self.tts_vol = 1.0
-        self.lang_to = "pt"
+        self.lang_to = "pb"
         self.initUI()
         
         self.timer = QTimer(self)
@@ -204,7 +210,9 @@ class OverlayWindow(QWidget):
             self.from_box.addItem(name, userData=code)
             self.to_box.addItem(name, userData=code)
             if code == "en": self.from_box.setCurrentIndex(self.from_box.count()-1)
-            if code == "pt": self.to_box.setCurrentIndex(self.to_box.count()-1)
+            if code == "pb": self.to_box.setCurrentIndex(self.to_box.count()-1)
+            elif code == "pt" and self.to_box.currentIndex() == -1: 
+                self.to_box.setCurrentIndex(self.to_box.count()-1)
 
         self.from_box.currentIndexChanged.connect(self.update_langs)
         self.to_box.currentIndexChanged.connect(self.update_langs)
