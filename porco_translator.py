@@ -9,7 +9,7 @@ import argostranslate.package
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QFrame, QPlainTextEdit, QComboBox, QSizeGrip)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor, QGuiApplication
+from PyQt6.QtGui import QFont, QTextCursor, QGuiApplication, QIcon
 from faster_whisper import WhisperModel
 
 # Configurações Globais
@@ -189,6 +189,7 @@ class OverlayWindow(QWidget):
         self.font_size = 18
         self.tts_vol = 1.0
         self.initUI()
+        self.setWindowIcon(QIcon("/home/porco/.local/share/icons/porco_translator.png"))
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_modifiers)
@@ -376,15 +377,25 @@ class OverlayWindow(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
+    print("Dica: Segure SHIFT para abrir o menu e arrastar a janela.")
+    print("Iniciando Porco Lingua v12...")
+    
     splash = QLabel("Carregando Porco Lingua v12 (High Speed)...")
     splash.setWindowFlags(Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint)
     splash.setStyleSheet("background:#05050a; color:#fff; padding:30px; border-radius:15px; border:1px solid #333; font-weight:bold;")
     splash.show()
     app.processEvents()
 
-    model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE)
+    try:
+        print("Carregando modelo de IA (Faster-Whisper)...")
+        model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE)
+    except Exception as e:
+        print(f"Erro ao carregar modelo Whisper: {e}")
+        sys.exit(1)
+        
     splash.close()
 
+    print("Iniciando captura de áudio parallelism...")
     audio_queue = queue.Queue()
     
     audio_worker = AudioWorker(audio_queue, get_best_audio_source())
@@ -398,5 +409,6 @@ if __name__ == "__main__":
     audio_worker.start()
     proc_worker.start()
     
+    print("Pronto! Porco Lingua rodando.")
     win.show()
     sys.exit(app.exec())
