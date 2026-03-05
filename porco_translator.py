@@ -1,30 +1,24 @@
 #!/home/porco/.local/share/porco_translator/venv/bin/python
 """
-Porco Lingua v11.0 - Tradutor Conversacional (Streaming + Histórico + Controles)
+Porco Lingua v12.0 - Tradutor Ultra-Rápido (Paralelismo Real-Time)
 """
-import sys, os, subprocess, threading, select, time
+import sys, os, subprocess, threading, select, time, queue
 import numpy as np
-
-# IA Safety & Performance
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
-from PyQt6.QtWidgets import (QApplication, QLabel, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QFrame, QSizeGrip,
-                             QComboBox, QPlainTextEdit)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QTimer
-from PyQt6.QtGui import QFont, QColor, QGuiApplication, QTextCursor
-from faster_whisper import WhisperModel
 import argostranslate.translate
+import argostranslate.package
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QPushButton, QFrame, QPlainTextEdit, QComboBox, QSizeGrip)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QFont, QTextCursor, QGuiApplication
+from faster_whisper import WhisperModel
 
 # Configurações Globais
 WHISPER_MODEL = "base.en"
 DEVICE = "cuda"
 COMPUTE = "int8"
 RATE = 16000
-COLLECT_SECS = 2  # Menor tempo para streaming mais rápido
+COLLECT_SECS = 1  # Captura a cada 1 segundo para latência mínima
 
-# Mapeamento de Idiomas Instalados
 def get_installed_langs():
     try:
         langs = argostranslate.translate.get_installed_languages()
@@ -40,32 +34,18 @@ def get_installed_langs():
 
 def get_best_audio_source():
     try:
-        info = subprocess.check_output(["pactl", "info"], text=True)
-        default_sink = ""
-        for line in info.splitlines():
-            if "Default Sink:" in line:
-                default_sink = line.split(":")[1].strip()
-        
-        sources = subprocess.check_output(["pactl", "list", "short", "sources"], text=True)
-        for line in sources.splitlines():
-            parts = line.split()
-            if len(parts) >= 2:
-                name = parts[1]
-                if default_sink and name == f"{default_sink}.monitor":
-                    return name
-        for line in sources.splitlines():
-            name = line.split()[1]
-            if "easyeffects_sink.monitor" in name: return name
-            if ".monitor" in name: return name
-    except: pass
-    return "easyeffects_sink.monitor"
+        res = subprocess.check_output(["pactl", "get-default-source"], text=True).strip()
+        if not res:
+            res = subprocess.check_output(["pactl", "list", "short", "sources"], text=True).split('\n')[0].split('\t')[1]
+        return res
+    except: return "auto"
 
 def list_pw_sources():
     try:
         out = subprocess.check_output(["pactl", "list", "short", "sources"], text=True)
         found = []
-        for line in out.splitlines():
-            parts = line.split()
+        for line in out.strip().split('\n'):
+            parts = line.split('\t')
             if len(parts) >= 2:
                 name = parts[1]
                 label = name.replace("alsa_input.", "🎙 ").replace("alsa_output.", "🔊 ").replace(".analog-stereo", "").replace(".monitor", " (Monitor)")
@@ -75,22 +55,19 @@ def list_pw_sources():
         return [("Padrão", get_best_audio_source())]
 
 class AudioWorker(QThread):
-    new_segment = pyqtSignal(str)
+    """
+    Capturador de áudio puro. 
+    Apenas captura e joga na fila para não bloquear o tempo real.
+    """
     status = pyqtSignal(str)
 
-    def __init__(self, model, source, lang_from="en"):
+    def __init__(self, audio_queue, source):
         super().__init__()
-        self.model = model
+        self.audio_queue = audio_queue
         self.source = source
-        self.lang_from = lang_from
         self.running = True
         self._proc = None
         self._lock = threading.Lock()
-        self._clear_request = False
-
-    def clear_buffer(self):
-        with self._lock:
-            self._clear_request = True
 
     def change_source(self, new_source):
         with self._lock:
@@ -102,7 +79,6 @@ class AudioWorker(QThread):
 
     def run(self):
         CHUNK_BYTES = RATE * 2 * COLLECT_SECS
-        
         while self.running:
             self.status.emit("Ouvindo...")
             with self._lock:
@@ -122,73 +98,96 @@ class AudioWorker(QThread):
                     if not p or p.poll() is not None: break
                         
                     if p.stdout:
-                        ready, _, _ = select.select([p.stdout], [], [], 0.1)
+                        ready, _, _ = select.select([p.stdout], [], [], 0.05)
                         if ready:
                             chunk = p.stdout.read(4096)
                             if chunk: buffer += chunk
                     
-                    # Checa pedido de reset
-                    with self._lock:
-                        if self._clear_request:
-                            buffer = b""
-                            self._clear_request = False
-                            continue
-                    
                     if len(buffer) >= CHUNK_BYTES:
-                        # Lógica anti-atraso: se o buffer tiver mais de 2 chunks, descarta o excesso
-                        if len(buffer) > CHUNK_BYTES * 2:
-                            buffer = buffer[-CHUNK_BYTES:]
-                        
                         raw = buffer[:CHUNK_BYTES]
-                        # Mantemos 0.5s de overlap para contexto
-                        overlap = int(RATE * 2 * 0.5)
+                        # Overlap de 0.3s para contexto
+                        overlap = int(RATE * 2 * 0.3)
                         buffer = buffer[CHUNK_BYTES-overlap:]
                         
-                        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-                        peak = np.max(np.abs(audio))
-                        
-                        if peak < 0.01: continue
-                        
-                        # Normalização suave
-                        if peak < 0.8: audio = audio * (0.8 / (peak + 1e-6))
-                        
-                        # Lógica de Transcrição Inteligente:
-                        # 1. vad_filter=True: Usa Silero VAD para ignorar ruídos/música que não são fala.
-                        # 2. no_speech_threshold: Descarta segmentos se a IA achar q é silêncio (>0.6 prob).
-                        # 3. compression_ratio_threshold: Evita loops infinitos de texto repetido.
-                        segments, _ = self.model.transcribe(
-                            audio, 
-                            beam_size=5, 
-                            language=self.lang_from, 
-                            vad_filter=True,
-                            vad_parameters=dict(min_silence_duration_ms=500),
-                            no_speech_threshold=0.6,
-                            compression_ratio_threshold=2.4,
-                            log_prob_threshold=-1.0
-                        )
-                        for seg in segments:
-                            # Filtro Final de Confiança: só envia se a prob de ser fala for alta.
-                            if seg.no_speech_prob < 0.5:
-                                txt = seg.text.strip()
-                                if txt and len(txt) > 2:
-                                    self.new_segment.emit(txt)
+                        # Adiciona na fila. Se a fila estiver grande, descarta o áudio velho.
+                        if self.audio_queue.qsize() > 3:
+                            try: self.audio_queue.get_nowait()
+                            except: pass
+                        self.audio_queue.put(raw)
+
             except: pass
             with self._lock:
                 if self._proc:
                     try: self._proc.terminate()
                     except: pass
                     self._proc = None
-            time.sleep(0.3)
+            time.sleep(0.1)
+
+class ProcessorWorker(QThread):
+    """
+    Processador de IA (Whisper + Argos).
+    Roda em paralelo ao capturador.
+    """
+    new_segment = pyqtSignal(str)
+
+    def __init__(self, audio_queue, model):
+        super().__init__()
+        self.audio_queue = audio_queue
+        self.model = model
+        self.lang_from = "en"
+        self.lang_to = "pb"
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                # Espera por áudio na fila
+                raw = self.audio_queue.get(timeout=0.5)
+                
+                audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                peak = np.max(np.abs(audio))
+                
+                # VAD e Filtros de Sensibilidade
+                if peak < 0.015: continue
+                
+                # Normalização suave
+                if peak < 0.7: audio = audio * (0.7 / (peak + 1e-6))
+                
+                # Transcrição com Whisper
+                segments, _ = self.model.transcribe(
+                    audio, 
+                    beam_size=3, # Menor beam para maior velocidade
+                    language=self.lang_from, 
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=400),
+                    no_speech_threshold=0.6,
+                    compression_ratio_threshold=2.4
+                )
+                
+                for seg in segments:
+                    if seg.no_speech_prob < 0.5:
+                        txt = seg.text.strip()
+                        if txt and len(txt) > 2:
+                            # Tradução Imediata com Argos
+                            try:
+                                translated = argostranslate.translate.translate(txt, self.lang_from, self.lang_to)
+                                self.new_segment.emit(translated if translated else txt)
+                            except:
+                                self.new_segment.emit(txt)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Erro no Processador: {e}")
 
 class OverlayWindow(QWidget):
-    def __init__(self, worker):
+    def __init__(self, audio_worker, proc_worker):
         super().__init__()
-        self.worker = worker
+        self.audio_worker = audio_worker
+        self.proc_worker = proc_worker
         self._dragging = False
         self._drag_pos = QPoint()
         self.font_size = 18
         self.tts_vol = 1.0
-        self.lang_to = "pb"
         self.initUI()
         
         self.timer = QTimer(self)
@@ -200,8 +199,8 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         
-        self.setGeometry(100, 100, 800, 200) # Janela maior para histórico
-        self.setMinimumSize(300, 100)
+        self.setGeometry(100, 100, 800, 250)
+        self.setMinimumSize(400, 100)
 
         self.box = QFrame(self)
         self.box.setObjectName("Box")
@@ -211,23 +210,22 @@ class OverlayWindow(QWidget):
         layout.addWidget(self.box)
 
         self.inner = QVBoxLayout(self.box)
-        self.inner.setContentsMargins(8, 8, 8, 8)
-        self.inner.setSpacing(5)
+        self.inner.setContentsMargins(10, 10, 10, 10)
+        self.inner.setSpacing(8)
 
-        # Barra Superior (Controles)
+        # Barra Superior
         self.ctrl_widget = QWidget()
         self.ctrl_bar = QVBoxLayout(self.ctrl_widget)
         self.ctrl_bar.setContentsMargins(0, 0, 0, 0)
         self.ctrl_bar.setSpacing(4)
 
-        # Linha 1: Arrastar, Linguagens, Sair
         l1 = QHBoxLayout()
         self.handle = QFrame()
-        self.handle.setFixedSize(16, 16)
-        self.handle.setStyleSheet("background: rgba(220,180,60,120); border-radius:3px;")
+        self.handle.setFixedSize(18, 18)
+        self.handle.setStyleSheet("background: rgba(220,180,60,150); border-radius:4px;")
         l1.addWidget(self.handle)
 
-        combo_s = "QComboBox { background: rgba(30,40,60,150); color: #ccc; font-size: 10px; border:none; border-radius:3px; padding: 2px; }"
+        combo_s = "QComboBox { background: rgba(30,40,60,180); color: #fff; font-size: 11px; border:none; border-radius:4px; padding: 3px; }"
         
         self.from_box = QComboBox()
         self.from_box.setStyleSheet(combo_s)
@@ -240,44 +238,38 @@ class OverlayWindow(QWidget):
             self.to_box.addItem(name, userData=code)
             if code == "en": self.from_box.setCurrentIndex(self.from_box.count()-1)
             if code == "pb": self.to_box.setCurrentIndex(self.to_box.count()-1)
-            elif code == "pt" and self.to_box.currentIndex() == -1: 
-                self.to_box.setCurrentIndex(self.to_box.count()-1)
 
         self.from_box.currentIndexChanged.connect(self.update_langs)
         self.to_box.currentIndexChanged.connect(self.update_langs)
         
-        # Status Label (Pequeno e discreto)
-        self.status_lbl = QLabel("Aguardando...")
-        self.status_lbl.setStyleSheet("color: rgba(255,255,255,100); font-size: 9px; padding-left: 5px;")
-        
         l1.addWidget(self.from_box)
         l1.addWidget(QLabel("→"))
         l1.addWidget(self.to_box)
+
+        self.status_lbl = QLabel("Aguardando...")
+        self.status_lbl.setStyleSheet("color: rgba(255,255,255,120); font-size: 10px; padding-left: 8px;")
         l1.addWidget(self.status_lbl)
         
         l1.addStretch()
 
         self.xbtn = QPushButton("✕")
-        self.xbtn.setFixedSize(20, 20)
-        self.xbtn.setStyleSheet("background: rgba(200,50,50,150); color: white; border-radius:10px; font-weight:bold;")
+        self.xbtn.setFixedSize(22, 22)
+        self.xbtn.setStyleSheet("background: rgba(220,60,60,180); color: white; border-radius:11px; font-weight:bold;")
         self.xbtn.clicked.connect(self.close)
         l1.addWidget(self.xbtn)
         self.ctrl_bar.addLayout(l1)
 
-        # Linha 2: Fonte, Volume, Scroll, Áudio
         l2 = QHBoxLayout()
-        btn_s = "QPushButton { background: rgba(60,80,100,150); color: #fff; font-size: 9px; border-radius:3px; padding: 3px 6px; border:none; }"
+        btn_s = "QPushButton { background: rgba(70,90,110,180); color: #fff; font-size: 10px; border-radius:4px; padding: 4px 8px; border:none; }"
         
-        # Audio Source
         self.src_btn = QComboBox()
         self.src_btn.setStyleSheet(combo_s)
         for label, name in list_pw_sources():
             self.src_btn.addItem(label, userData=name)
-            if name == self.worker.source: self.src_btn.setCurrentIndex(self.src_btn.count()-1)
-        self.src_btn.currentIndexChanged.connect(lambda i: self.worker.change_source(self.src_btn.itemData(i)))
+            if name == self.audio_worker.source: self.src_btn.setCurrentIndex(self.src_btn.count()-1)
+        self.src_btn.currentIndexChanged.connect(lambda i: self.audio_worker.change_source(self.src_btn.itemData(i)))
         l2.addWidget(self.src_btn)
 
-        # Font
         l2.addWidget(QLabel("Fonte:"))
         self.fplus = QPushButton("A+")
         self.fplus.setStyleSheet(btn_s)
@@ -288,32 +280,18 @@ class OverlayWindow(QWidget):
         self.fminus.clicked.connect(lambda: self.change_font(-2))
         l2.addWidget(self.fminus)
 
-        # TTS Volume
         l2.addWidget(QLabel("Voz:"))
         self.vplus = QPushButton("V+")
         self.vplus.setStyleSheet(btn_s)
-        self.vplus.clicked.connect(lambda: self.change_vol(0.1))
+        self.vplus.clicked.connect(lambda: self.change_vol(0.2))
         l2.addWidget(self.vplus)
         self.vminus = QPushButton("V-")
         self.vminus.setStyleSheet(btn_s)
-        self.vminus.clicked.connect(lambda: self.change_vol(-0.1))
+        self.vminus.clicked.connect(lambda: self.change_vol(-0.2))
         l2.addWidget(self.vminus)
 
-        # Scroll
-        l2.addWidget(QLabel("Rolar:"))
-        self.s_up = QPushButton("▲")
-        self.s_up.setStyleSheet(btn_s)
-        self.s_up.clicked.connect(lambda: self.hist.verticalScrollBar().setValue(self.hist.verticalScrollBar().value() - 30))
-        l2.addWidget(self.s_up)
-        self.s_down = QPushButton("▼")
-        self.s_down.setStyleSheet(btn_s)
-        self.s_down.clicked.connect(lambda: self.hist.verticalScrollBar().setValue(self.hist.verticalScrollBar().value() + 30))
-        l2.addWidget(self.s_down)
-
-        l2.addStretch()
-        
-        self.wbtn = QPushButton("Ouvir")
-        self.wbtn.setStyleSheet("background: rgba(40,160,80,150); color: white; border-radius:3px; padding:4px 10px; border:none; font-size:10px;")
+        self.wbtn = QPushButton("Ouvir Última")
+        self.wbtn.setStyleSheet(btn_s)
         self.wbtn.clicked.connect(self.read_last)
         l2.addWidget(self.wbtn)
 
@@ -326,10 +304,10 @@ class OverlayWindow(QWidget):
         self.inner.addWidget(self.ctrl_widget)
         self.ctrl_widget.hide()
 
-        # Histórico de Tradução
+        # Histórico
         self.hist = QPlainTextEdit()
         self.hist.setReadOnly(True)
-        self.hist.setStyleSheet("background: transparent; border: none; color: rgba(255,255,255,180);")
+        self.hist.setStyleSheet("background: transparent; border: none; color: white;")
         self.hist.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.hist.setFont(QFont("Inter", self.font_size, QFont.Weight.Bold))
         self.inner.addWidget(self.hist)
@@ -339,8 +317,9 @@ class OverlayWindow(QWidget):
         self.grip.setFixedSize(12, 12)
 
     def update_style(self, active):
-        bg = 150 if active else 40
-        self.box.setStyleSheet(f"#Box {{ background: rgba(5,5,10,{bg}); border: 1px solid rgba(255,255,255,10); border-radius:8px; }}")
+        bg = 160 if active else 50
+        border = "rgba(255,255,255,30)" if active else "rgba(255,255,255,10)"
+        self.box.setStyleSheet(f"#Box {{ background: rgba(10,10,15,{bg}); border: 1px solid {border}; border-radius:10px; }}")
         if active: self.ctrl_widget.show()
         else: self.ctrl_widget.hide()
 
@@ -356,28 +335,28 @@ class OverlayWindow(QWidget):
                 self.update_style(False)
 
     def update_langs(self):
-        self.worker.lang_from = self.from_box.itemData(self.from_box.currentIndex())
-        self.lang_to = self.to_box.itemData(self.to_box.currentIndex())
+        self.proc_worker.lang_from = self.from_box.itemData(self.from_box.currentIndex())
+        self.proc_worker.lang_to = self.to_box.itemData(self.to_box.currentIndex())
 
     def change_font(self, d):
-        self.font_size = max(8, min(80, self.font_size + d))
+        self.font_size = max(10, min(80, self.font_size + d))
         self.hist.setFont(QFont("Inter", self.font_size, QFont.Weight.Bold))
 
     def change_vol(self, d):
         self.tts_vol = max(0.1, min(2.0, self.tts_vol + d))
-        print(f"Volume TTS: {self.tts_vol:.1f}")
+        self.status_lbl.setText(f"Vol Voz: {self.tts_vol:.1f}")
 
     def clear_hist(self): 
         self.hist.clear()
-        self.worker.clear_buffer()
+        # Limpa a fila de áudio
+        while not self.proc_worker.audio_queue.empty():
+            try: self.proc_worker.audio_queue.get_nowait()
+            except: break
         self.status_lbl.setText("Limpo!")
 
     def on_new_text(self, text):
-        try:
-            res = argostranslate.translate.translate(text, self.worker.lang_from, self.lang_to)
-            self.hist.appendPlainText(res if res else text)
-            self.hist.moveCursor(QTextCursor.MoveOperation.End)
-        except: self.hist.appendPlainText(text)
+        self.hist.appendPlainText(text)
+        self.hist.moveCursor(QTextCursor.MoveOperation.End)
 
     def read_last(self):
         txt = self.hist.toPlainText().split('\n')[-1]
@@ -397,23 +376,27 @@ class OverlayWindow(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    splash = QLabel("Carregando Porco Lingua v11...")
+    splash = QLabel("Carregando Porco Lingua v12 (High Speed)...")
     splash.setWindowFlags(Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint)
-    splash.setStyleSheet("background:#111; color:#fff; padding:20px; border-radius:10px;")
+    splash.setStyleSheet("background:#05050a; color:#fff; padding:30px; border-radius:15px; border:1px solid #333; font-weight:bold;")
     splash.show()
     app.processEvents()
-    
-    try: model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE)
-    except Exception as e:
-        splash.setText(f"Erro IA: {e}")
-        time.sleep(4); sys.exit(1)
-    
+
+    model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE)
     splash.close()
+
+    audio_queue = queue.Queue()
     
-    worker = AudioWorker(model, get_best_audio_source())
-    win = OverlayWindow(worker)
-    worker.new_segment.connect(win.on_new_text)
-    worker.status.connect(win.status_lbl.setText)
-    worker.start()
+    audio_worker = AudioWorker(audio_queue, get_best_audio_source())
+    proc_worker = ProcessorWorker(audio_queue, model)
+    
+    win = OverlayWindow(audio_worker, proc_worker)
+    
+    proc_worker.new_segment.connect(win.on_new_text)
+    audio_worker.status.connect(win.status_lbl.setText)
+    
+    audio_worker.start()
+    proc_worker.start()
+    
     win.show()
     sys.exit(app.exec())
