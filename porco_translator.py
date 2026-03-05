@@ -86,6 +86,11 @@ class AudioWorker(QThread):
         self.running = True
         self._proc = None
         self._lock = threading.Lock()
+        self._clear_request = False
+
+    def clear_buffer(self):
+        with self._lock:
+            self._clear_request = True
 
     def change_source(self, new_source):
         with self._lock:
@@ -122,7 +127,18 @@ class AudioWorker(QThread):
                             chunk = p.stdout.read(4096)
                             if chunk: buffer += chunk
                     
+                    # Checa pedido de reset
+                    with self._lock:
+                        if self._clear_request:
+                            buffer = b""
+                            self._clear_request = False
+                            continue
+                    
                     if len(buffer) >= CHUNK_BYTES:
+                        # Lógica anti-atraso: se o buffer tiver mais de 2 chunks, descarta o excesso
+                        if len(buffer) > CHUNK_BYTES * 2:
+                            buffer = buffer[-CHUNK_BYTES:]
+                        
                         raw = buffer[:CHUNK_BYTES]
                         # Mantemos 0.5s de overlap para contexto
                         overlap = int(RATE * 2 * 0.5)
@@ -333,7 +349,10 @@ class OverlayWindow(QWidget):
         self.tts_vol = max(0.1, min(2.0, self.tts_vol + d))
         print(f"Volume TTS: {self.tts_vol:.1f}")
 
-    def clear_hist(self): self.hist.clear()
+    def clear_hist(self): 
+        self.hist.clear()
+        self.worker.clear_buffer()
+        self.lbl.setText("Histórico e áudio limpos.")
 
     def on_new_text(self, text):
         try:
