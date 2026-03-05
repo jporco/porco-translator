@@ -152,13 +152,26 @@ class AudioWorker(QThread):
                         # Normalização suave
                         if peak < 0.8: audio = audio * (0.8 / (peak + 1e-6))
                         
+                        # Lógica de Transcrição Inteligente:
+                        # 1. vad_filter=True: Usa Silero VAD para ignorar ruídos/música que não são fala.
+                        # 2. no_speech_threshold: Descarta segmentos se a IA achar q é silêncio (>0.6 prob).
+                        # 3. compression_ratio_threshold: Evita loops infinitos de texto repetido.
                         segments, _ = self.model.transcribe(
-                            audio, beam_size=5, language=self.lang_from, vad_filter=False
+                            audio, 
+                            beam_size=5, 
+                            language=self.lang_from, 
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500),
+                            no_speech_threshold=0.6,
+                            compression_ratio_threshold=2.4,
+                            log_prob_threshold=-1.0
                         )
                         for seg in segments:
-                            txt = seg.text.strip()
-                            if txt and len(txt) > 2:
-                                self.new_segment.emit(txt)
+                            # Filtro Final de Confiança: só envia se a prob de ser fala for alta.
+                            if seg.no_speech_prob < 0.5:
+                                txt = seg.text.strip()
+                                if txt and len(txt) > 2:
+                                    self.new_segment.emit(txt)
             except: pass
             with self._lock:
                 if self._proc:
