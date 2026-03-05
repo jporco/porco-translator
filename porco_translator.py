@@ -147,7 +147,7 @@ class AudioWorker(QThread):
                         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
                         peak = np.max(np.abs(audio))
                         
-                        if peak < 0.005: continue
+                        if peak < 0.01: continue
                         
                         # Normalização suave
                         if peak < 0.8: audio = audio * (0.8 / (peak + 1e-6))
@@ -232,10 +232,15 @@ class OverlayWindow(QWidget):
 
         self.from_box.currentIndexChanged.connect(self.update_langs)
         self.to_box.currentIndexChanged.connect(self.update_langs)
-        l1.addWidget(QLabel("De:"))
+        
+        # Status Label (Pequeno e discreto)
+        self.status_lbl = QLabel("Aguardando...")
+        self.status_lbl.setStyleSheet("color: rgba(255,255,255,100); font-size: 9px; padding-left: 5px;")
+        
         l1.addWidget(self.from_box)
-        l1.addWidget(QLabel("Para:"))
+        l1.addWidget(QLabel("→"))
         l1.addWidget(self.to_box)
+        l1.addWidget(self.status_lbl)
         
         l1.addStretch()
 
@@ -352,7 +357,7 @@ class OverlayWindow(QWidget):
     def clear_hist(self): 
         self.hist.clear()
         self.worker.clear_buffer()
-        self.lbl.setText("Histórico e áudio limpos.")
+        self.status_lbl.setText("Limpo!")
 
     def on_new_text(self, text):
         try:
@@ -395,8 +400,7 @@ if __name__ == "__main__":
     worker = AudioWorker(model, get_best_audio_source())
     win = OverlayWindow(worker)
     worker.new_segment.connect(win.on_new_text)
+    worker.status.connect(win.status_lbl.setText)
     worker.start()
-    
-    app._worker = worker
     win.show()
     sys.exit(app.exec())
