@@ -1,13 +1,12 @@
 #!/bin/bash
-# Professional Interactive Installer for Porco Translator
+# Professional Installer for Porco Translator 🐽
 
-# Cores para o terminal
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${BLUE}🐽 Iniciando instalador do Porco Translator...${NC}"
+echo -e "${BLUE}🐽 Instalador do Porco Translator...${NC}"
 
 # 1. Perguntar local de instalação
 DEFAULT_INSTALL_DIR="$HOME/.local/share/porco-translator"
@@ -34,69 +33,57 @@ echo -e "${BLUE}📁 Preparando instalação em: $INSTALL_DIR${NC}"
 
 # 2. Copiar arquivos para o local de destino
 echo "📦 Copiando arquivos do projeto..."
-# Usamos rsync se disponível, senão cp
-if command -v rsync &> /dev/null; then
-    rsync -av --exclude 'venv' --exclude '.git' --exclude '__pycache__' ./ "$INSTALL_DIR/"
-else
-    cp -r ./ "$INSTALL_DIR/"
-    rm -rf "$INSTALL_DIR/venv" "$INSTALL_DIR/.git" "$INSTALL_DIR/__pycache__" 2>/dev/null
-fi
+rsync -av --exclude 'venv' --exclude '.git' --exclude '__pycache__' ./ "$INSTALL_DIR/"
 
 cd "$INSTALL_DIR" || exit
 
 # 3. Dependências do Sistema
 echo -e "\n${BLUE}⚙️ Verificando dependências do sistema...${NC}"
 if command -v pacman &> /dev/null; then
-    sudo pacman -S --needed --noconfirm python python-pip pipewire pipewire-audio ffmpeg rsync
-elif command -v dnf &> /dev/null; then
-    sudo dnf install -y python3 python3-pip pipewire ffmpeg rsync
+    sudo pacman -S --needed --noconfirm python python-pip pipewire pipewire-audio ffmpeg rsync wmctrl xdotool
+elif command -v apt-get &> /dev/null; then
+    sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv pipewire ffmpeg rsync wmctrl xdotool
 fi
 
 # 4. Virtual Environment no local de destino
 VENV_PATH="$INSTALL_DIR/venv"
 if [ ! -d "$VENV_PATH" ]; then
     echo "🐍 Criando ambiente virtual dedicado..."
-    python -m venv "$VENV_PATH"
+    python3 -m venv "$VENV_PATH"
 fi
 
 # 5. Instalar dependências Python
-echo "📥 Instalando dependências do Python (isso pode levar um minuto na primeira vez)..."
+echo "📥 Instalando dependências do Python..."
 "$VENV_PATH/bin/pip" install --upgrade pip
 "$VENV_PATH/bin/pip" install -r requirements.txt
 
-# 6. Configuração do Piper (opcional)
-if [ ! -f "$HOME/.local/bin/piper_read.sh" ]; then
-    echo "🔊 Configurando script TTS em ~/.local/bin/..."
-    mkdir -p "$HOME/.local/bin"
-    cp piper_read.sh "$HOME/.local/bin/"
-    chmod +x "$HOME/.local/bin/piper_read.sh"
-fi
-
-# 7. Criar atalho Desktop
+# 6. Criar atalho Desktop
 echo "🖥️ Criando atalho no menu de aplicativos..."
 mkdir -p "$HOME/.local/share/icons"
 mkdir -p "$HOME/.local/share/applications"
-cp porco_translator.png "$HOME/.local/share/icons/porco_translator.png"
+cp assets/porco.svg "$HOME/.local/share/icons/porco_translator.svg" 2>/dev/null || cp porco_translator.png "$HOME/.local/share/icons/porco_translator.png"
 
-cat <<EOF > "$HOME/.local/share/applications/porco_translator.desktop"
+cat <<EOF_DESK > "$HOME/.local/share/applications/porco_translator.desktop"
 [Desktop Entry]
 Name=Porco Translator
 Comment=Tradutor Real-Time com IA para Jogos e Vídeos
-Exec=$VENV_PATH/bin/python $INSTALL_DIR/porco_translator.py
+Exec=bash -c "DISPLAY=:0 $VENV_PATH/bin/python $INSTALL_DIR/porco_translator.py"
 Icon=porco_translator
 Terminal=false
 Type=Application
 Path=$INSTALL_DIR
 Categories=Utility;AudioVideo;
 StartupNotify=true
-EOF
+EOF_DESK
 
 chmod +x "$HOME/.local/share/applications/porco_translator.desktop"
 chmod +x "$INSTALL_DIR/porco_translator.py"
+chmod +x "$INSTALL_DIR/porco_listener.py"
+chmod +x "$INSTALL_DIR/porco_ui.py"
 
-# 8. Criar Desinstalador
+# 7. Criar Desinstalador
 echo "🗑️ Gerando script de desinstalação..."
-cat <<EOF > "$INSTALL_DIR/uninstall.sh"
+cat <<EOF_UN > "$INSTALL_DIR/uninstall.sh"
 #!/bin/bash
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -105,15 +92,15 @@ echo -e "\${RED}🚨 Desinstalando Porco Translator...\${NC}"
 read -p "Tem certeza que deseja remover todos os arquivos de $INSTALL_DIR? [s/N]: " confirm
 if [[ "\$confirm" == "s" || "\$confirm" == "S" ]]; then
     rm -f "\$HOME/.local/share/applications/porco_translator.desktop"
+    rm -f "\$HOME/.local/share/icons/porco_translator.svg"
+    rm -f "\$HOME/.local/share/icons/porco_translator.png"
     rm -rf "$INSTALL_DIR"
     echo -e "\${GREEN}✅ Desinstalado com sucesso!\${NC}"
 else
     echo "Operação cancelada."
 fi
-EOF
+EOF_UN
 chmod +x "$INSTALL_DIR/uninstall.sh"
 
-echo -e "\n${GREEN}✨ Instalação Concluída com Sucesso!${NC}"
+echo -e "\n${GREEN}✨ Instalação Conclída com Sucesso!${NC}"
 echo -e "Você já pode abrir o 'Porco Translator' no seu menu de aplicativos."
-echo -e "Local: ${BLUE}$INSTALL_DIR${NC}"
-echo -e "Desinstalador disponível em: ${BLUE}$INSTALL_DIR/uninstall.sh${NC}"

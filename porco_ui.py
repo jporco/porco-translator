@@ -9,6 +9,7 @@ from deep_translator import GoogleTranslator
 DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
 UDP_IP, UDP_PORT_LISTENER, UDP_PORT_UI = "127.0.0.1", 50135, 50134
+HISTORY_PATH = os.path.expanduser("~/.config/porco-translator/history.json")
 ASH_DIM, BG_DARK, BG_PANEL, BONE = "#606060", "rgba(13, 13, 13, 220)", "rgba(20, 20, 20, 240)", "#e0e0e0"
 ICON_PATH = os.path.join(DIR, "porco.svg")
 
@@ -157,6 +158,9 @@ class TranslatorUI(QWidget):
         # Aplica o modo inicial (Ghost/Edit) de forma estável no boot
         self.apply_window_mode()
         
+        # Load history
+        QTimer.singleShot(200, self.load_history)
+        
         QTimer(self, timeout=self.raise_, interval=5000).start()
         QTimer.singleShot(1000, self.do_auto_detect) # Auto-detect audio source 1s after start
 
@@ -212,7 +216,9 @@ class TranslatorUI(QWidget):
         p1 = QPushButton("a-"); p1.setFixedSize(24,24); p1.clicked.connect(lambda: self.change_font(-2))
         p2 = QPushButton("A+"); p2.setFixedSize(24,24); p2.clicked.connect(lambda: self.change_font(2))
         cp = QPushButton("🎨"); cp.setFixedSize(24,24); cp.clicked.connect(self.pick_color)
-        cl.addWidget(st); cl.addStretch(); cl.addWidget(p1); cl.addWidget(p2); cl.addWidget(cp)
+        p_clr = QPushButton("🧹"); p_clr.setFixedSize(24,24); p_clr.clicked.connect(self.clear_history)
+        p_clr.setToolTip("Limpar Histórico de Texto")
+        cl.addWidget(st); cl.addStretch(); cl.addWidget(p1); cl.addWidget(p2); cl.addWidget(cp); cl.addWidget(p_clr)
         ctrl_l.addWidget(c)
 
         c2 = QWidget(); c2l = QHBoxLayout(c2); c2l.setContentsMargins(0,0,0,0)
@@ -274,10 +280,29 @@ class TranslatorUI(QWidget):
         except: pass
 
     def change_font(self, d):
-        self.font_size = max(10, min(70, self.font_size + d)); self.save_cfg()
+        self.font_size = max(6, min(70, self.font_size + d)); self.save_cfg()
         if self.active_label: self.active_label.setFont(QFont("Inter", self.font_size))
         for lb in self.history_labels: lb.setFont(QFont("Inter", self.font_size))
-        self.live_eng.setFont(QFont("Inter", max(10, self.font_size-4)))
+        self.live_eng.setFont(QFont("Inter", max(6, self.font_size-4)))
+
+    def clear_history(self):
+        """Remove todos os labels do histórico e limpa o arquivo."""
+        # Remove labels da lista e deleta widgets do layout
+        for lb in self.history_labels:
+            lb.deleteLater()
+        self.history_labels = []
+        
+        # O active_label é resetado para vazio
+        if self.active_label:
+            self.active_label.setText(" ")
+            
+        # Limpa o arquivo de histórico físico
+        try:
+            with open(HISTORY_PATH, "w") as f:
+                json.dump([], f)
+        except: pass
+        
+        self.sc.verticalScrollBar().setValue(0)
 
     def apply_window_mode(self):
         """Aplica as flags de janela baseadas no modo ghost/edit. Chamado apenas no início para estabilidade."""
@@ -377,17 +402,34 @@ class TranslatorUI(QWidget):
                 self.live_eng.setText("...")
                 self.start_line()
             self.sc.verticalScrollBar().setValue(self.sc.verticalScrollBar().maximum())
+            self.save_history()
 
     def on_peak(self, v):
         if hasattr(self, 'p_lbl'):
             if v > 0.01: self.p_lbl.setText("🔊"); self.p_lbl.setStyleSheet("color: #00ffaa; font-weight: bold;")
             else: self.p_lbl.setText("🔈"); self.p_lbl.setStyleSheet(f"color: {ASH_DIM};")
 
-    def start_line(self):
+    def start_line(self, text=" "):
         if self.active_label: self.history_labels.append(self.active_label)
-        l = QLabel(" "); l.setFont(QFont("Inter", self.font_size)); l.setStyleSheet(f"color: {self.text_color}; font-weight: bold;"); l.setWordWrap(True)
+        l = QLabel(text); l.setFont(QFont("Inter", self.font_size)); l.setStyleSheet(f"color: {self.text_color}; font-weight: bold;"); l.setWordWrap(True)
         self.hl.addWidget(l); self.active_label = l
-        if len(self.history_labels) > 20: self.history_labels.pop(0).deleteLater()
+        if len(self.history_labels) > 500: self.history_labels.pop(0).deleteLater()
+
+    def save_history(self):
+        h = [lb.text() for lb in self.history_labels if lb.text().strip()]
+        if self.active_label and self.active_label.text().strip(): h.append(self.active_label.text())
+        try:
+            with open(HISTORY_PATH, "w") as f: json.dump(h[-500:], f)
+        except: pass
+
+    def load_history(self):
+        if not os.path.exists(HISTORY_PATH): return
+        try:
+            h = json.load(open(HISTORY_PATH, "r"))
+            for t in h:
+                self.start_line(t)
+            self.start_line() # Empty active line
+        except: pass
 
     def pick_color(self):
         d = QColorDialog(QColor(self.text_color), self)
