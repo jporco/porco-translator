@@ -168,9 +168,17 @@ class TranslatorUI(QWidget):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(QIcon(ICON_PATH) if os.path.exists(ICON_PATH) else QIcon())
         m = QMenu(); m.setStyleSheet(f"QMenu {{ background: {BG_PANEL}; color: {BONE}; }} QMenu::item:selected {{ background: {ASH_DIM}; }}")
+        
         self.act = QAction("Modo Edição", self); self.act.setCheckable(True); self.act.setChecked(not self.ghost_mode)
         self.act.triggered.connect(self.toggle_edit_mode)
-        m.addAction(self.act); m.addSeparator(); m.addAction("Sair", self.close_all)
+        m.addAction(self.act)
+        
+        clear_act = QAction("🧹 Limpar Histórico", self)
+        clear_act.triggered.connect(self.clear_history)
+        m.addAction(clear_act)
+        
+        m.addSeparator()
+        m.addAction("Sair", self.close_all)
         self.tray.setContextMenu(m); self.tray.show()
 
     def setup_window(self):
