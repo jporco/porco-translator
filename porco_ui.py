@@ -153,6 +153,10 @@ class TranslatorUI(QWidget):
         self.receiver = UdpReceiver()
         self.receiver.signal_text.connect(self.on_text); self.receiver.signal_peak.connect(self.on_peak)
         threading.Thread(target=self.receiver.listen, daemon=True).start()
+        
+        # Aplica o modo inicial (Ghost/Edit) de forma estável no boot
+        self.apply_window_mode()
+        
         QTimer(self, timeout=self.raise_, interval=5000).start()
         QTimer.singleShot(1000, self.do_auto_detect) # Auto-detect audio source 1s after start
 
@@ -247,13 +251,8 @@ class TranslatorUI(QWidget):
         self.sc.setWidget(self.hw); l.addWidget(self.sc)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, self.ghost_mode)
 
-        # Resize grip (bolinha) — visible circle in bottom-right corner
-        if not self.ghost_mode:
-            self.grip = ResizeGrip(self)
-        
         g = self.config.get("geometry", [100, 100, 500, 300]); self.setGeometry(g[0], g[1], g[2], g[3])
-        if not self.ghost_mode:
-            self.grip.reposition()
+        # O grip agora é criado sob demanda ou atualizado no toggle_edit_mode
         self.start_line()
 
     def do_auto_detect(self):
@@ -280,37 +279,62 @@ class TranslatorUI(QWidget):
         for lb in self.history_labels: lb.setFont(QFont("Inter", self.font_size))
         self.live_eng.setFont(QFont("Inter", max(10, self.font_size-4)))
 
-    def toggle_edit_mode(self, checked):
-        """Mostra/esconde controles de edição sem reconstruir a janela."""
-        self.ghost_mode = not checked
-        self.config["ghost_mode"] = self.ghost_mode
-        ConfigManager.save(self.config)
-        
-        # Atualiza flags de janela dinamicamente
+    def apply_window_mode(self):
+        """Aplica as flags de janela baseadas no modo ghost/edit. Chamado apenas no início para estabilidade."""
+        # Se for modo Ghost, usa flags agressivas para sumir da barra e ficar transparente
         f = (Qt.WindowType.FramelessWindowHint
              | Qt.WindowType.WindowStaysOnTopHint
-             | Qt.WindowType.Tool
-             | Qt.WindowType.X11BypassWindowManagerHint)
+             | Qt.WindowType.Tool)
+             
         if self.ghost_mode:
-            f |= Qt.WindowType.WindowTransparentForInput
+            f |= Qt.WindowType.X11BypassWindowManagerHint | Qt.WindowType.WindowTransparentForInput
+            
         self.setWindowFlags(f)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, self.ghost_mode)
-        self.show() # Necessário após setWindowFlags
         
-        if hasattr(self, 'ctrl_widget'):
-            self.ctrl_widget.setVisible(checked)
-        # Atualiza borda: sem controles = sem fundo
-        if hasattr(self, 'cont'):
-            if checked:
-                self.cont.setStyleSheet(f"background: {BG_DARK}; border: 1px solid {ASH_DIM}; border-radius: 4px;")
-            else:
-                self.cont.setStyleSheet("background: transparent; border: none;")
-        if hasattr(self, 'grip'):
-            self.grip.setVisible(checked)
+        # Configura visibilidade dos controles conforme o modo carregado
+        if not self.ghost_mode:
+            if not hasattr(self, 'grip'):
+                self.grip = ResizeGrip(self)
+            self.grip.reposition()
+            self.grip.show()
+            self.ctrl_widget.show()
+            self.cont.setStyleSheet(f"background: {BG_DARK}; border: 1px solid {ASH_DIM}; border-radius: 4px;")
+        else:
+            if hasattr(self, 'grip'):
+                self.grip.hide()
+            self.ctrl_widget.hide()
+            self.cont.setStyleSheet("background: transparent; border: none;")
+
+    def toggle_edit_mode(self, checked):
+        """Apenas salva a preferência e avisa o usuário. Troca de flags dinâmica causava crash."""
+        self.ghost_mode = not checked
+        self.config["ghost_mode"] = self.ghost_mode
+        self.save_cfg()
+        
+        # Em vez de mudar as flags agora, avisamos o usuário
+        msg_txt = "𝗠𝗼𝗱𝗼 𝗘𝗱𝗶𝗰̧𝗮̃𝗼 𝘀𝗮𝗹𝘃𝗼! Reinicie o Tradutor para aplicar." if checked else "𝗠𝗼𝗱𝗼 𝗚𝗵𝗼𝘀𝘁 𝘀𝗮𝗹𝘃𝗼! Reinicie o Tradutor para aplicar."
+        
+        # Tenta mostrar na própria UI como uma mensagem de sistema
+        if self.active_label:
+            self.on_text({"text": f"SYSTEM: {msg_txt}", "is_final": True})
+            
+        # Mostra notificação do sistema
+        self.tray.showMessage("Porco Translator", msg_txt, QSystemTrayIcon.MessageIcon.Information, 5000)
+        
+        # Atualiza o estado visual do botão no menu da bandeja para o usuário ter feedback
+        self.act.setChecked(checked)
 
     def save_cfg(self):
         if not hasattr(self, 'b1'): return
-        self.config.update({"lang_from": self.b1.itemData(), "lang_to": self.b2.itemData(), "audio_source": self.s.currentData(), "ghost_mode": self.ghost_mode, "font_size": self.font_size})
+        self.config.update({
+            "lang_from": self.b1.itemData(), 
+            "lang_to": self.b2.itemData(), 
+            "audio_source": self.s.currentData(), 
+            "ghost_mode": self.ghost_mode, 
+            "font_size": self.font_size,
+            "text_color": self.text_color
+        })
         r = self.geometry(); self.config["geometry"] = [r.x(), r.y(), r.width(), r.height()]; ConfigManager.save(self.config)
         msg = {"type": "config", "lang_from": self.b1.itemData(), "audio_source": self.s.currentData()}
         try: self.udp_sock.sendto(json.dumps(msg).encode('utf-8'), (UDP_IP, UDP_PORT_LISTENER))
@@ -376,48 +400,26 @@ class TranslatorUI(QWidget):
         self.save_cfg()
 
     # ── Resize & Move ─────────────────────────────────────────────────────────
-    def get_resize_edge(self, pos):
-        w, h = self.width(), self.height()
-        x, y = pos.x(), pos.y()
-        edge = 0
-        if x < self.resize_margin: edge |= Qt.Edge.LeftEdge.value
-        if x > w - self.resize_margin: edge |= Qt.Edge.RightEdge.value
-        if y < self.resize_margin: edge |= Qt.Edge.TopEdge.value
-        if y > h - self.resize_margin: edge |= Qt.Edge.BottomEdge.value
-        return Qt.Edges(edge)
-
-    def update_cursor(self, edge):
-        if edge is None:
-            self.setCursor(Qt.CursorShape.ArrowCursor); return
-        if edge == (Qt.Edge.LeftEdge | Qt.Edge.TopEdge) or edge == (Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif edge == (Qt.Edge.RightEdge | Qt.Edge.TopEdge) or edge == (Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
-            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif edge in [Qt.Edge.LeftEdge, Qt.Edge.RightEdge]:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif edge in [Qt.Edge.TopEdge, Qt.Edge.BottomEdge]:
-            self.setCursor(Qt.CursorShape.SizeVerCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
+    # ── Mover e Redimensionar ──────────────────────────────────────────────────
     def mousePressEvent(self, e):
         if self.ghost_mode: return
         if e.button() == Qt.MouseButton.LeftButton:
-            self.resizing = False
+            # Só permite arrastar a janela se clicar no bloco de controles (barra superior)
+            # ou em áreas que não sejam os labels de texto para evitar cliques acidentais
             self.dp = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            e.accept()
 
     def mouseMoveEvent(self, e):
         if self.ghost_mode: return
-        pos = e.position().toPoint()
-        if not self.resizing:
-            self.update_cursor(self.get_resize_edge(pos))
-            if e.buttons() == Qt.MouseButton.LeftButton and hasattr(self, 'dp'):
-                self.move(e.globalPosition().toPoint() - self.dp)
+        if e.buttons() == Qt.MouseButton.LeftButton and hasattr(self, 'dp'):
+            self.move(e.globalPosition().toPoint() - self.dp)
+            e.accept()
 
     def mouseReleaseEvent(self, e):
-        self.resizing = False
-        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if hasattr(self, 'dp'):
+            delattr(self, 'dp')
         self.save_cfg()
+        e.accept()
 
     def close_all(self): subprocess.call(["pkill", "-9", "-f", "porco_"]); sys.exit(0)
 
