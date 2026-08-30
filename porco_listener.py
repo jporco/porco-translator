@@ -1,4 +1,15 @@
-import sys, os, subprocess, threading, time, queue, json, socket, signal, numpy as np
+import json
+import os
+import queue
+import re
+import signal
+import socket
+import subprocess
+import threading
+import time
+from collections import deque
+
+import numpy as np
 from faster_whisper import WhisperModel
 
 UDP_IP   = "127.0.0.1"
@@ -6,17 +17,38 @@ UDP_TO   = 50134    # porta da UI
 UDP_FROM = 50135    # porta de config
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
 
-# ── tamanho de chunk: 0.5 s @ 16 kHz, 16-bit mono ──────────────────────────
+# ── áudio PCM: 1 s @ 16 kHz, 16-bit mono ────────────────────────────────────
 SAMPLE_RATE  = 16000
 CHUNK_BYTES  = SAMPLE_RATE * 2   # 32 000 bytes = 1 s por leitura do pipe
 MIN_CHUNKS   = 2                  # mínimo de chunks para transcrever (~2 s)
-FINAL_CHUNKS = 10                 # chunks suficientes para finalizar linha (~10 s)
+INFER_EVERY  = 1                  # reavalia a janela a cada ~1 s
+SILENCE_FLUSH = 2                 # finaliza após ~2 s de silêncio
+MAX_AUDIO_QUEUE = 16               # margem para o processamento sem perder áudio
+MAX_WINDOW_SECONDS = 8             # janela sobreposta para estabilizar palavras
+STABILITY_DELAY = 1.5              # só confirma áudio já distante da borda
+COMMIT_WORDS = 7                    # tamanho confortável para cada bloco histórico
+COMPUTE_TYPE = os.environ.get("PORCO_WHISPER_COMPUTE", "int8_float32")
 
 def load_c():
     if os.path.exists(CONFIG_PATH):
         try: return json.load(open(CONFIG_PATH, 'r'))
         except: pass
     return {}
+
+def resolve_audio_source(source):
+    """Converte 'default' no monitor da saída padrão do sistema."""
+    if source not in (None, "", "default"):
+        return source
+    try:
+        sink = subprocess.check_output(
+            ["pactl", "get-default-sink"], text=True, timeout=2
+        ).strip()
+        if sink:
+            return f"{sink}.monitor"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # O PulseAudio compatível aceita este alias; não cai no microfone padrão.
+    return "@DEFAULT_MONITOR@"
 
 class Broadcaster:
     def __init__(self): self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -27,50 +59,127 @@ class Broadcaster:
 class Proc:
     def __init__(self, q, b, lf):
         self.q, self.b, self.lf, self.running = q, b, lf, True
-        # Tenta 'small', cai para 'base' se falhar (memória)
-        # Tenta 'base', cai para 'tiny' se falhar
-        for model_name in ("base", "tiny"):
-            try:
-                self.m = WhisperModel(model_name, device="cuda", compute_type="float32")
-                print(f"[listener] Modelo carregado na GPU (float32): {model_name}", flush=True)
+        self.m = None
+        preferred_model = os.environ.get(
+            "PORCO_WHISPER_MODEL",
+            "small.en" if lf == "en" else "small",
+        )
+        if lf == "en":
+            fallback_models = ["base.en", "tiny.en"]
+        else:
+            fallback_models = ["base", "tiny"]
+        candidates = list(dict.fromkeys([preferred_model] + fallback_models))
+        compute_types = list(dict.fromkeys((COMPUTE_TYPE, "int8_float32", "float32")))
+        for model_name in candidates:
+            for compute_type in compute_types:
+                if compute_type == "float32" and COMPUTE_TYPE != "float32":
+                    continue
+                try:
+                    self.m = WhisperModel(
+                        model_name, device="cuda", compute_type=compute_type
+                    )
+                    print(
+                        f"[listener] Modelo GPU: {model_name} ({compute_type})",
+                        flush=True,
+                    )
+                    break
+                except Exception as ex:
+                    print(
+                        f"[listener] Falha GPU {model_name}/{compute_type}: {ex}",
+                        flush=True,
+                    )
+            if self.m is not None:
                 break
+
+        if self.m is None:
+            try:
+                self.m = WhisperModel(candidates[0], device="cpu", compute_type="int8")
+                print(f"[listener] Fallback CPU: {candidates[0]} (int8)", flush=True)
             except Exception as ex:
-                print(f"[listener] Falha ao carregar {model_name} na GPU: {ex}", flush=True)
-                # Fallback para base em CPU se CUDA falhar totalmente
-                if model_name == "tiny":
-                    try:
-                        self.m = WhisperModel("base", device="cpu", compute_type="int8")
-                        print("[listener] Fallback: Modelo 'base' carregado na CPU", flush=True)
-                    except:
-                        self.m = None
+                print(f"[listener] Não foi possível carregar o Whisper: {ex}", flush=True)
 
     def transcribe(self, audio):
-        """Transcreve array float32. Retorna string."""
-        if self.m is None: return ""
+        """Transcreve e devolve palavras com timestamps relativos à janela."""
+        if self.m is None: return []
         try:
             segs, info = self.m.transcribe(
                 audio,
                 language=self.lf if self.lf != "auto" else None,
-                beam_size=3,
-                best_of=3,
+                beam_size=5,
                 vad_filter=True,
                 vad_parameters=dict(
                     min_silence_duration_ms=400,
                     speech_pad_ms=300,
                     threshold=0.3,
                 ),
-                without_timestamps=True,
+                word_timestamps=True,
                 condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
             )
-            return " ".join(s.text for s in segs).strip()
+            words = []
+            for segment in segs:
+                if segment.words:
+                    for word in segment.words:
+                        if word.start is not None and word.end is not None:
+                            words.append((word.start, word.end, word.word))
+            return words
         except Exception as ex:
             print(f"[listener] Erro transcrição: {ex}", flush=True)
-            return ""
+            return []
+
+    @staticmethod
+    def _word_key(text):
+        return re.sub(r"[^\w]+", "", text.casefold(), flags=re.UNICODE)
+
+    @staticmethod
+    def _format_words(words):
+        text = " ".join(word[2].strip() for word in words).strip()
+        return re.sub(r"\s+([,.!?;:%])", r"\1", text)
+
+    def _stable_words(self, current, previous, window_start, stream_end, force=False):
+        """Retorna somente palavras confirmadas em duas janelas consecutivas."""
+        current_abs = [
+            (window_start + start, window_start + end, text)
+            for start, end, text in current
+        ]
+        if force:
+            return current_abs
+
+        safe_end = stream_end - STABILITY_DELAY
+        stable = []
+        used = set()
+        for start, end, text in current_abs:
+            if end > safe_end:
+                continue
+            key = self._word_key(text)
+            if not key:
+                continue
+            best = None
+            for index, (p_start, p_end, p_text) in enumerate(previous):
+                if index in used or self._word_key(p_text) != key:
+                    continue
+                if abs(p_start - start) <= 0.8 or min(p_end, end) > max(p_start, start):
+                    distance = abs(p_start - start)
+                    if best is None or distance < best[0]:
+                        best = (distance, index)
+            if best is not None:
+                used.add(best[1])
+                stable.append((start, end, text))
+        return stable
 
     def run(self):
-        buf = []           # chunks acumulados
+        buf = deque()
+        buffered_samples = 0
+        stream_samples = 0
         silence_count = 0  # chunks consecutivos sem pico
-        SILENCE_FLUSH = 4  # nº de chunks silenciosos para forçar finalização
+        utterance_id = 0
+        chunks_since_inference = 0
+        previous_words = []
+        committed_end = 0.0
+        pending_words = []
+        speech_seen = False
+        max_window_samples = SAMPLE_RATE * MAX_WINDOW_SECONDS
 
         while self.running:
             try:
@@ -83,35 +192,76 @@ class Proc:
             self.b.send({"type": "peak", "value": peak})
 
             buf.append(data)
+            buffered_samples += len(data)
+            stream_samples += len(data)
+            chunks_since_inference += 1
 
             if peak < 0.005:
                 silence_count += 1
             else:
                 silence_count = 0
+                speech_seen = True
 
-            # Nada suficiente para transcrever ainda
+            while buffered_samples > max_window_samples:
+                buffered_samples -= len(buf.popleft())
+
             if len(buf) < MIN_CHUNKS:
                 continue
 
-            # Decide se transcreve agora
-            enough_silence = (silence_count >= SILENCE_FLUSH and len(buf) >= MIN_CHUNKS)
-            enough_length  = (len(buf) >= FINAL_CHUNKS)
+            enough_silence = silence_count >= SILENCE_FLUSH
+            enough_time = chunks_since_inference >= INFER_EVERY
+            if not enough_silence and not enough_time:
+                continue
 
-            if enough_silence or enough_length:
-                audio = np.concatenate(buf)
-                text  = self.transcribe(audio)
-                is_final = True
-                if text:
-                    self.b.send({"type": "text", "text": text, "is_final": is_final})
-                    print(f"[listener] [{self.lf}] final={is_final}: {text}", flush=True)
-                buf = []
+            audio = np.concatenate(buf)
+            window_start = (stream_samples - buffered_samples) / SAMPLE_RATE
+            current_words = self.transcribe(audio)
+            force = enough_silence and speech_seen
+            stable = self._stable_words(
+                current_words,
+                previous_words,
+                window_start,
+                stream_samples / SAMPLE_RATE,
+                force=force,
+            )
+            new_words = [word for word in stable if word[1] > committed_end + 0.05]
+            if new_words:
+                pending_words.extend(new_words)
+                committed_end = max(word[1] for word in new_words)
+
+            if pending_words:
+                last_word = pending_words[-1][2].strip()
+                complete_block = (
+                    force
+                    or len(pending_words) >= COMMIT_WORDS
+                    or bool(re.search(r"[.!?…]$", last_word))
+                )
+                if complete_block:
+                    text = self._format_words(pending_words)
+                    utterance_id += 1
+                    self.b.send({
+                        "type": "text",
+                        "text": text,
+                        "is_final": True,
+                        "utterance_id": utterance_id,
+                    })
+                    print(f"[listener] [{self.lf}] confirmado: {text}", flush=True)
+                    pending_words = []
+
+            previous_words = [
+                (window_start + start, window_start + end, text)
+                for start, end, text in current_words
+            ]
+            chunks_since_inference = 0
+
+            if force:
+                buf.clear()
+                buffered_samples = 0
+                previous_words = []
+                committed_end = stream_samples / SAMPLE_RATE
+                pending_words = []
                 silence_count = 0
-            else:
-                # Transcrição parcial a cada chunk (enquanto tem voz)
-                audio = np.concatenate(buf)
-                text  = self.transcribe(audio)
-                if text:
-                    self.b.send({"type": "text", "text": text, "is_final": False})
+                speech_seen = False
 
 class Listener:
     def __init__(self, q):
@@ -129,9 +279,13 @@ class Listener:
             except: pass
         cmd = ["parecord", "--format", "s16le", "--rate", str(SAMPLE_RATE),
                "--channels", "1", "--raw", "--latency-msec=50"]
-        if self.source and self.source != "default":
-            cmd += ["--device", self.source]
-        print(f"[listener] Capturando de: {self.source}", flush=True)
+        capture_source = resolve_audio_source(self.source)
+        if capture_source:
+            cmd += ["--device", capture_source]
+        print(
+            f"[listener] Capturando de: {capture_source} (configurado: {self.source})",
+            flush=True,
+        )
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         threading.Thread(target=self._read_pipe, daemon=True).start()
 
@@ -140,7 +294,18 @@ class Listener:
         while self.running and self.proc is proc:
             d = proc.stdout.read(CHUNK_BYTES)
             if d:
-                self.q.put(d)
+                try:
+                    self.q.put_nowait(d)
+                except queue.Full:
+                    # Sempre prioriza áudio recente para limitar a latência.
+                    try:
+                        self.q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.q.put_nowait(d)
+                    except queue.Full:
+                        pass
             else:
                 break
 
@@ -148,6 +313,15 @@ class Listener:
         if self.source != n:
             self.source = n
             self.start_capture()
+
+    def stop(self):
+        self.running = False
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
 
 def udp_cfg(proc, listener):
     """Recebe config da UI via UDP."""
@@ -165,10 +339,18 @@ def udp_cfg(proc, listener):
 
 def main():
     c = load_c()
-    q  = queue.Queue()
+    q  = queue.Queue(maxsize=MAX_AUDIO_QUEUE)
     b  = Broadcaster()
     p  = Proc(q, b, c.get("lang_from", "en"))
     l  = Listener(q)
+
+    def stop(signum, _frame):
+        p.running = False
+        l.stop()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
     l.start_capture()
     threading.Thread(target=udp_cfg, args=(p, l), daemon=True).start()
     p.run()

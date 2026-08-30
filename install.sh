@@ -1,5 +1,6 @@
-#!/bin/bash
-# Professional Installer for Porco Translator 🐽
+#!/usr/bin/env bash
+set -euo pipefail
+# Professional Interactive Installer for Porco Translator
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -47,9 +48,14 @@ fi
 
 # 4. Virtual Environment no local de destino
 VENV_PATH="$INSTALL_DIR/venv"
-if [ ! -d "$VENV_PATH" ]; then
+if [ ! -x "$VENV_PATH/bin/python" ] || ! "$VENV_PATH/bin/python" -c 'import sys' >/dev/null 2>&1; then
+    if [ -d "$VENV_PATH" ]; then
+        BROKEN_VENV="$INSTALL_DIR/venv.broken-$(date +%Y%m%d-%H%M%S)"
+        mv "$VENV_PATH" "$BROKEN_VENV"
+        echo "⚠️ Ambiente inválido movido para: $BROKEN_VENV"
+    fi
     echo "🐍 Criando ambiente virtual dedicado..."
-    python3 -m venv "$VENV_PATH"
+    python3 -m venv --copies "$VENV_PATH"
 fi
 
 # 5. Instalar dependências Python

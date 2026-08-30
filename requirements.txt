@@ -3,3 +3,5 @@ faster-whisper==1.2.1
 numpy==2.4.2
 PyQt6==6.10.2
 PyQt6_sip==13.11.0
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

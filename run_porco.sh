@@ -1,18 +1,46 @@
-#!/bin/bash
-# Porco Translator - Fail-safe Launcher (v17.3)
+#!/usr/bin/env bash
+# Porco Translator - launcher robusto (v17.3)
+set -u
 
-VENV_PATH="/mnt/X/arch/porco_translator/venv"
-SCRIPT_PATH="/mnt/X/arch/porco_translator/code/porco_translator.py"
+CODE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$CODE_DIR/../venv" ]]; then
+    VENV_PATH="$(cd -- "$CODE_DIR/../venv" && pwd)"
+else
+    VENV_PATH="$CODE_DIR/venv"
+fi
+SCRIPT_PATH="$CODE_DIR/porco_translator.py"
 
-echo "Matando todas as instâncias do Porco Translator..."
-pkill -9 -f "porco_translator.py" 2>/dev/null
-pkill -9 -f "porco_listener.py" 2>/dev/null
-pkill -9 -f "porco_ui.py" 2>/dev/null
-sleep 0.5
+PYTHON_VERSION="$(/usr/bin/python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+SITE_PACKAGES="$VENV_PATH/lib/python${PYTHON_VERSION}/site-packages"
+PYTHON="$VENV_PATH/bin/python"
 
-echo "Iniciando com venv: $VENV_PATH"
-export PYTHONPATH="$VENV_PATH/lib/python3.14/site-packages:$PYTHONPATH"
-export LD_LIBRARY_PATH="$VENV_PATH/lib/python3.14/site-packages/nvidia/cublas/lib:$VENV_PATH/lib/python3.14/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
+# Ambientes copiados de outro sistema podem conter atalhos inválidos em bin/python.
+# Nesse caso, o Python do sistema usa as dependências preservadas no venv via PYTHONPATH.
+if [[ ! -x "$PYTHON" ]] || ! "$PYTHON" -c 'import sys' >/dev/null 2>&1; then
+    PYTHON=/usr/bin/python3
+fi
 
-# Executa o script diretamente com o python do venv
-"$VENV_PATH/bin/python" "$SCRIPT_PATH"
+if [[ -d "$SITE_PACKAGES" ]]; then
+    if [[ -n "${PYTHONPATH:-}" ]]; then
+        export PYTHONPATH="$SITE_PACKAGES:$PYTHONPATH"
+    else
+        export PYTHONPATH="$SITE_PACKAGES"
+    fi
+fi
+
+CUDA_PATHS=()
+for path in "$SITE_PACKAGES/nvidia/cublas/lib" "$SITE_PACKAGES/nvidia/cudnn/lib" /opt/cuda/lib64; do
+    [[ -d "$path" ]] && CUDA_PATHS+=("$path")
+done
+if (( ${#CUDA_PATHS[@]} )); then
+    CUDA_LIBS="$(IFS=:; printf '%s' "${CUDA_PATHS[*]}")"
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        export LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH"
+    else
+        export LD_LIBRARY_PATH="$CUDA_LIBS"
+    fi
+fi
+
+echo "Iniciando Porco Translator com: $PYTHON"
+echo "Dependências Python: $SITE_PACKAGES"
+exec "$PYTHON" "$SCRIPT_PATH"

@@ -1,10 +1,11 @@
 import sys, os, json, socket, threading, time, subprocess, concurrent.futures
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QFrame, QComboBox,
-                             QScrollArea, QColorDialog, QSystemTrayIcon, QMenu, QSizeGrip)
+                             QScrollArea, QColorDialog, QSystemTrayIcon, QMenu, QSizeGrip,
+                             QGraphicsDropShadowEffect)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, Q_ARG, QPoint
 from PyQt6.QtGui import QFont, QIcon, QColor, QAction, QPixmap, QPainter, QPen, QBrush
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
@@ -12,6 +13,18 @@ UDP_IP, UDP_PORT_LISTENER, UDP_PORT_UI = "127.0.0.1", 50135, 50134
 HISTORY_PATH = os.path.expanduser("~/.config/porco-translator/history.json")
 ASH_DIM, BG_DARK, BG_PANEL, BONE = "#606060", "rgba(13, 13, 13, 220)", "rgba(20, 20, 20, 240)", "#e0e0e0"
 ICON_PATH = os.path.join(DIR, "porco.svg")
+MYMEMORY_LANGS = {
+    "en": "english us",
+    "pt": "portuguese brazil",
+    "es": "spanish",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "ja": "japanese",
+    "ko": "korean",
+    "zh-CN": "chinese simplified",
+    "ru": "russian",
+}
 
 class ConfigManager:
     @staticmethod
@@ -29,16 +42,16 @@ class ConfigManager:
 def list_pw_sources():
     try:
         out = subprocess.check_output(["pactl", "list", "short", "sources"], text=True)
-        found = []
+        found = [("🔊 Padrão do sistema", "default")]
         for line in out.strip().split('\n'):
             parts = line.split('\t')
             if len(parts) >= 2:
                 n = parts[1]
                 l = n.replace("alsa_input.", "").replace("alsa_output.", "").replace(".analog-stereo", "").replace(".monitor", "")
-                label = f"🎙️ {l[:15]}" if "input" in n else f"🖥️ {l[:15]}"
+                label = f"🎙️ {l}" if "alsa_input." in n else f"🖥️ {l}"
                 found.append((label, n))
         return found
-    except: return [("Padrão", "default")]
+    except: return [("🔊 Padrão do sistema", "default")]
 
 class UdpReceiver(QObject):
     signal_text = pyqtSignal(dict); signal_peak = pyqtSignal(float)
@@ -131,36 +144,32 @@ class TranslatorUI(QWidget):
         super().__init__()
         self.config = ConfigManager.load(); self.ghost_mode = self.config.get("ghost_mode", False)
         self.text_color = self.config.get("text_color", "#00ffaa"); self.font_size = self.config.get("font_size", 22)
-        self.active_label = None; self.history_labels = []; self.last_text = ""
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        self.active_label = None; self.history_labels = []
+        # Uma fila única preserva a ordem das falas confirmadas.
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
+
         # Resize logic
         self.resize_margin = 10
         self.resizing = False
         self.resize_edge = None
         self.setMouseTracking(True)
-        
+
         # Real-time state
-        self.last_translated_text = ""
-        self.pending_translation = None
-        self.translation_timer = QTimer(); self.translation_timer.setSingleShot(True); self.translation_timer.timeout.connect(self.process_deferred_translation)
-        
         # UI Initialized
         self.init_tray()
         self.live_eng = QLabel("...") # Fixed attribute
         self.setup_window()
-        
+
         self.receiver = UdpReceiver()
         self.receiver.signal_text.connect(self.on_text); self.receiver.signal_peak.connect(self.on_peak)
         threading.Thread(target=self.receiver.listen, daemon=True).start()
-        
+
         # Aplica o modo inicial (Ghost/Edit) de forma estável no boot
         self.apply_window_mode()
-        
-        # Load history
-        QTimer.singleShot(200, self.load_history)
-        
+        # Carrega antes de iniciar o fluxo de novas falas para não duplicar
+        # linhas caso uma transcrição final chegue durante a inicialização.
+        self.load_history()
         QTimer(self, timeout=self.raise_, interval=5000).start()
         QTimer.singleShot(1000, self.do_auto_detect) # Auto-detect audio source 1s after start
 
@@ -168,15 +177,13 @@ class TranslatorUI(QWidget):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(QIcon(ICON_PATH) if os.path.exists(ICON_PATH) else QIcon())
         m = QMenu(); m.setStyleSheet(f"QMenu {{ background: {BG_PANEL}; color: {BONE}; }} QMenu::item:selected {{ background: {ASH_DIM}; }}")
-        
         self.act = QAction("Modo Edição", self); self.act.setCheckable(True); self.act.setChecked(not self.ghost_mode)
         self.act.triggered.connect(self.toggle_edit_mode)
         m.addAction(self.act)
-        
+
         clear_act = QAction("🧹 Limpar Histórico", self)
         clear_act.triggered.connect(self.clear_history)
         m.addAction(clear_act)
-        
         m.addSeparator()
         m.addAction("Sair", self.close_all)
         self.tray.setContextMenu(m); self.tray.show()
@@ -235,10 +242,13 @@ class TranslatorUI(QWidget):
         self.b2 = ExternalComboBox(langs, self.config.get("lang_to", "pt"))
         c2l.addWidget(QLabel("🔈")); c2l.addWidget(self.b1); c2l.addWidget(QLabel("→")); c2l.addWidget(self.b2)
 
-        self.s = QComboBox(); self.s.setFixedWidth(140); self.s.setStyleSheet("font-size: 10px;")
-        for lb, d in list_pw_sources(): self.s.addItem(lb, d)
+        self.s = QComboBox(); self.s.setFixedWidth(230); self.s.setStyleSheet("font-size: 10px;")
+        for lb, d in list_pw_sources():
+            self.s.addItem(lb, d)
+            self.s.setItemData(self.s.count() - 1, d, Qt.ItemDataRole.ToolTipRole)
         idx = self.s.findData(self.config.get("audio_source", "default"))
         if idx >= 0: self.s.setCurrentIndex(idx)
+        else: self.s.setCurrentIndex(0)
         c2l.addWidget(self.s)
 
         self.scan_btn = QPushButton("🔍"); self.scan_btn.setFixedSize(24,24); self.scan_btn.clicked.connect(self.do_auto_detect)
@@ -260,6 +270,7 @@ class TranslatorUI(QWidget):
         # Dual-Label setup
         self.live_eng.setFont(QFont("Inter", max(10, self.font_size - 4)))
         self.live_eng.setStyleSheet(f"color: {ASH_DIM}; font-style: italic;"); self.live_eng.setWordWrap(True)
+        self.add_text_outline(self.live_eng)
         self.hl.addWidget(self.live_eng)
         
         self.sc.setWidget(self.hw); l.addWidget(self.sc)
@@ -270,20 +281,13 @@ class TranslatorUI(QWidget):
         self.start_line()
 
     def do_auto_detect(self):
-        # Só auto-detecta se estiver no "Padrão" (default)
-        if self.config.get("audio_source", "default") != "default":
+        # "default" significa o monitor da saída padrão, não o microfone padrão.
+        if self.s.currentData() != "default":
             return
         try:
             df = subprocess.check_output(["pactl", "get-default-sink"], text=True).strip()
-            target = df + ".monitor"; out = subprocess.check_output(["pactl", "list", "short", "sources"], text=True)
-            for line in out.strip().split('\n'):
-                parts = line.split('\t')
-                if len(parts) >= 2:
-                    name = parts[1]; status = parts[-1] if len(parts) > 5 else ""
-                    if ".monitor" in name and "RUNNING" in status and "easyeffects" not in name.lower():
-                        target = name; break
-            ix = self.s.findData(target)
-            if ix >= 0: self.s.setCurrentIndex(ix)
+            target = df + ".monitor"
+            self.s.setToolTip(f"Padrão do sistema: {target}")
             self.save_cfg()
         except: pass
 
@@ -299,17 +303,14 @@ class TranslatorUI(QWidget):
         for lb in self.history_labels:
             lb.deleteLater()
         self.history_labels = []
-        
         # O active_label é resetado para vazio
         if self.active_label:
             self.active_label.setText(" ")
-            
         # Limpa o arquivo de histórico físico
         try:
             with open(HISTORY_PATH, "w") as f:
                 json.dump([], f)
         except: pass
-        
         self.sc.verticalScrollBar().setValue(0)
 
     def apply_window_mode(self):
@@ -375,36 +376,39 @@ class TranslatorUI(QWidget):
 
     def on_text(self, m):
         t, f = m.get("text", ""), m.get("is_final", False)
-        if not t: return
-        self.live_eng.setText(f"ENG: {t}")
-        
-        # Garante que temos um label ativo para a tradução aparecer
-        if not self.active_label:
-            self.start_line()
-            
-        if t != self.last_text:
-            self.last_text = t
-            self.pending_translation = (t, f)
-            self.translation_timer.start(250)
+        # Hipóteses parciais são instáveis e não entram na tela nem no histórico.
+        if not t or not f: return
+        self.executor.submit(self.translate_bg, t)
 
-    def process_deferred_translation(self):
-        if self.pending_translation:
-            t, f = self.pending_translation
-            self.executor.submit(self.translate_bg, t, f)
-            self.pending_translation = None
-
-    def translate_bg(self, t, f):
+    def translate_bg(self, t):
         source_lang = self.config.get("lang_from", "en")
         target_lang = self.config.get("lang_to", "pt")
-        try: 
-            res = GoogleTranslator(source=source_lang, target=target_lang).translate(t)
-        except: 
-            res = t
-        QMetaObject.invokeMethod(self, "update_ui", Qt.ConnectionType.QueuedConnection, Q_ARG(str, res), Q_ARG(bool, f))
+        try:
+            res = MyMemoryTranslator(
+                source=MYMEMORY_LANGS.get(source_lang, source_lang),
+                target=MYMEMORY_LANGS.get(target_lang, target_lang),
+            ).translate(t)
+        except Exception as mymemory_error:
+            try:
+                res = GoogleTranslator(source=source_lang, target=target_lang).translate(t)
+            except Exception as google_error:
+                print(
+                    f"[ui] Tradução indisponível: MyMemory={mymemory_error}; "
+                    f"Google={google_error}",
+                    flush=True,
+                )
+                res = "⚠ tradução indisponível"
+        QMetaObject.invokeMethod(
+            self,
+            "update_ui",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, res),
+            Q_ARG(bool, True),
+        )
 
     @pyqtSlot(str, bool)
     def update_ui(self, t, f):
-        if self.active_label: 
+        if self.active_label:
             self.active_label.setText(t)
             if f:
                 self.live_eng.setText("...")
@@ -420,9 +424,18 @@ class TranslatorUI(QWidget):
     def start_line(self, text=" "):
         if self.active_label: self.history_labels.append(self.active_label)
         l = QLabel(text); l.setFont(QFont("Inter", self.font_size)); l.setStyleSheet(f"color: {self.text_color}; font-weight: bold;"); l.setWordWrap(True)
+        self.add_text_outline(l)
         self.hl.addWidget(l); self.active_label = l
         if len(self.history_labels) > 500: self.history_labels.pop(0).deleteLater()
 
+    @staticmethod
+    def add_text_outline(label):
+        """Aplica um contorno fino sem criar uma borda na janela."""
+        effect = QGraphicsDropShadowEffect(label)
+        effect.setBlurRadius(2.8)
+        effect.setOffset(0, 0)
+        effect.setColor(QColor("#080808"))
+        label.setGraphicsEffect(effect)
     def save_history(self):
         h = [lb.text() for lb in self.history_labels if lb.text().strip()]
         if self.active_label and self.active_label.text().strip(): h.append(self.active_label.text())
