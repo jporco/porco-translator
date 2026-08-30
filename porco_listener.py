@@ -17,17 +17,19 @@ UDP_TO   = 50134    # porta da UI
 UDP_FROM = 50135    # porta de config
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
 
-# ── áudio PCM: 1 s @ 16 kHz, 16-bit mono ────────────────────────────────────
+# ── áudio PCM: 0,5 s @ 16 kHz, 16-bit mono ──────────────────────────────────
 SAMPLE_RATE  = 16000
-CHUNK_BYTES  = SAMPLE_RATE * 2   # 32 000 bytes = 1 s por leitura do pipe
-MIN_CHUNKS   = 2                  # mínimo de chunks para transcrever (~2 s)
-INFER_EVERY  = 1                  # reavalia a janela a cada ~1 s
-SILENCE_FLUSH = 2                 # finaliza após ~2 s de silêncio
+CHUNK_SECONDS = 0.5
+CHUNK_BYTES  = int(SAMPLE_RATE * CHUNK_SECONDS * 2)
+MIN_CHUNKS   = 3                  # mínimo de áudio para transcrever (~1,5 s)
+INFER_EVERY  = 2                  # reavalia a janela a cada ~1 s
+SILENCE_FLUSH = 3                 # finaliza após ~1,5 s de silêncio
 MAX_AUDIO_QUEUE = 16               # margem para o processamento sem perder áudio
-MAX_WINDOW_SECONDS = 8             # janela sobreposta para estabilizar palavras
-STABILITY_DELAY = 1.5              # só confirma áudio já distante da borda
-COMMIT_WORDS = 7                    # tamanho confortável para cada bloco histórico
+MAX_WINDOW_SECONDS = 4             # janela sobreposta para estabilizar palavras
+STABILITY_DELAY = 0.8              # confirma mais perto da fala atual
+COMMIT_WORDS = 5                    # entrega blocos menores sem reescrever o histórico
 COMPUTE_TYPE = os.environ.get("PORCO_WHISPER_COMPUTE", "int8_float32")
+BEAM_SIZE = max(1, int(os.environ.get("PORCO_WHISPER_BEAM_SIZE", "3")))
 
 def load_c():
     if os.path.exists(CONFIG_PATH):
@@ -62,12 +64,12 @@ class Proc:
         self.m = None
         preferred_model = os.environ.get(
             "PORCO_WHISPER_MODEL",
-            "small.en" if lf == "en" else "small",
+            "base.en" if lf == "en" else "base",
         )
         if lf == "en":
-            fallback_models = ["base.en", "tiny.en"]
+            fallback_models = ["tiny.en"]
         else:
-            fallback_models = ["base", "tiny"]
+            fallback_models = ["tiny"]
         candidates = list(dict.fromkeys([preferred_model] + fallback_models))
         compute_types = list(dict.fromkeys((COMPUTE_TYPE, "int8_float32", "float32")))
         for model_name in candidates:
@@ -105,11 +107,11 @@ class Proc:
             segs, info = self.m.transcribe(
                 audio,
                 language=self.lf if self.lf != "auto" else None,
-                beam_size=5,
+                beam_size=BEAM_SIZE,
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=400,
-                    speech_pad_ms=300,
+                    min_silence_duration_ms=300,
+                    speech_pad_ms=200,
                     threshold=0.3,
                 ),
                 word_timestamps=True,

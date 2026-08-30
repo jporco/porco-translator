@@ -1,11 +1,11 @@
-import sys, os, json, socket, threading, time, subprocess, concurrent.futures
+import sys, os, json, socket, threading, time, subprocess, concurrent.futures, requests
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QFrame, QComboBox,
                              QScrollArea, QColorDialog, QSystemTrayIcon, QMenu, QSizeGrip,
                              QGraphicsDropShadowEffect)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, Q_ARG, QPoint
 from PyQt6.QtGui import QFont, QIcon, QColor, QAction, QPixmap, QPainter, QPen, QBrush
-from deep_translator import GoogleTranslator, MyMemoryTranslator
+from deep_translator import GoogleTranslator
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
@@ -13,19 +13,6 @@ UDP_IP, UDP_PORT_LISTENER, UDP_PORT_UI = "127.0.0.1", 50135, 50134
 HISTORY_PATH = os.path.expanduser("~/.config/porco-translator/history.json")
 ASH_DIM, BG_DARK, BG_PANEL, BONE = "#606060", "rgba(13, 13, 13, 220)", "rgba(20, 20, 20, 240)", "#e0e0e0"
 ICON_PATH = os.path.join(DIR, "porco.svg")
-MYMEMORY_LANGS = {
-    "en": "english us",
-    "pt": "portuguese brazil",
-    "es": "spanish",
-    "fr": "french",
-    "de": "german",
-    "it": "italian",
-    "ja": "japanese",
-    "ko": "korean",
-    "zh-CN": "chinese simplified",
-    "ru": "russian",
-}
-
 class ConfigManager:
     @staticmethod
     def load():
@@ -384,10 +371,9 @@ class TranslatorUI(QWidget):
         source_lang = self.config.get("lang_from", "en")
         target_lang = self.config.get("lang_to", "pt")
         try:
-            res = MyMemoryTranslator(
-                source=MYMEMORY_LANGS.get(source_lang, source_lang),
-                target=MYMEMORY_LANGS.get(target_lang, target_lang),
-            ).translate(t)
+            # O wrapper antigo usa HTTP sem timeout e pode bloquear dezenas de
+            # segundos. A API HTTPS responde mais rápido e tem limite explícito.
+            res = self.translate_mymemory_fast(t, source_lang, target_lang)
         except Exception as mymemory_error:
             try:
                 res = GoogleTranslator(source=source_lang, target=target_lang).translate(t)
@@ -405,6 +391,24 @@ class TranslatorUI(QWidget):
             Q_ARG(str, res),
             Q_ARG(bool, True),
         )
+
+    @staticmethod
+    def translate_mymemory_fast(text, source_lang, target_lang):
+        if source_lang == target_lang:
+            return text.strip()
+        response = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
+            timeout=(1.0, 3.0),
+        )
+        response.raise_for_status()
+        data = response.json()
+        result = (data.get("responseData", {}).get("translatedText") or "").strip()
+        if not result:
+            raise RuntimeError("MyMemory não retornou uma tradução")
+        if result.casefold() == text.strip().casefold():
+            raise RuntimeError("MyMemory retornou o texto original")
+        return result
 
     @pyqtSlot(str, bool)
     def update_ui(self, t, f):
