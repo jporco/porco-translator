@@ -25,9 +25,9 @@ MIN_CHUNKS   = 3                  # mínimo de áudio para transcrever (~1,5 s)
 INFER_EVERY  = 2                  # reavalia a janela a cada ~1 s
 SILENCE_FLUSH = 3                 # finaliza após ~1,5 s de silêncio
 MAX_AUDIO_QUEUE = 16               # margem para o processamento sem perder áudio
-MAX_WINDOW_SECONDS = 4             # janela sobreposta para estabilizar palavras
+MAX_WINDOW_SECONDS = 3             # janela curta para manter o small.en em tempo real
 STABILITY_DELAY = 0.8              # confirma mais perto da fala atual
-COMMIT_WORDS = 5                    # entrega blocos menores sem reescrever o histórico
+COMMIT_WORDS = 7                    # contexto maior para a tradução sem reescrever o histórico
 COMPUTE_TYPE = os.environ.get("PORCO_WHISPER_COMPUTE", "int8_float32")
 BEAM_SIZE = max(1, int(os.environ.get("PORCO_WHISPER_BEAM_SIZE", "3")))
 
@@ -64,12 +64,12 @@ class Proc:
         self.m = None
         preferred_model = os.environ.get(
             "PORCO_WHISPER_MODEL",
-            "base.en" if lf == "en" else "base",
+            "small.en" if lf == "en" else "small",
         )
         if lf == "en":
-            fallback_models = ["tiny.en"]
+            fallback_models = ["base.en", "tiny.en"]
         else:
-            fallback_models = ["tiny"]
+            fallback_models = ["base", "tiny"]
         candidates = list(dict.fromkeys([preferred_model] + fallback_models))
         compute_types = list(dict.fromkeys((COMPUTE_TYPE, "int8_float32", "float32")))
         for model_name in candidates:

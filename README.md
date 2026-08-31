@@ -21,7 +21,7 @@ Tradutor em tempo real para jogos, vídeos e filmes. Captura áudio via PipeWire
 - **Smart Audio Detection**: Automatically identifies active PipeWire sinks and monitors.
 - **History & Scroll**: Keep track of the conversation with a scrollable history.
 - **Bounded latency**: Old audio is discarded when inference is slower than real time, preventing an ever-growing delay while keeping confirmed lines ordered.
-- **Low-latency recognition**: Uses `base.en` by default for English speech and falls back to `tiny.en`; set `PORCO_WHISPER_MODEL=small.en` when accuracy is more important than latency.
+- **Recognition quality**: Uses `small.en` by default for English speech and falls back to `base.en`/`tiny.en`; set `PORCO_WHISPER_MODEL` to override it. The short streaming window keeps latency bounded.
 
 ## 🛠️ Requirements
 

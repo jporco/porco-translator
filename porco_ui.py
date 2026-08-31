@@ -1,11 +1,11 @@
 import sys, os, json, socket, threading, time, subprocess, concurrent.futures, requests
+from bs4 import BeautifulSoup
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QFrame, QComboBox,
                              QScrollArea, QColorDialog, QSystemTrayIcon, QMenu, QSizeGrip,
                              QGraphicsDropShadowEffect)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, Q_ARG, QPoint
 from PyQt6.QtGui import QFont, QIcon, QColor, QAction, QPixmap, QPainter, QPen, QBrush
-from deep_translator import GoogleTranslator
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.expanduser("~/.config/porco-translator/config.json")
@@ -370,20 +370,25 @@ class TranslatorUI(QWidget):
     def translate_bg(self, t):
         source_lang = self.config.get("lang_from", "en")
         target_lang = self.config.get("lang_to", "pt")
-        try:
-            # O wrapper antigo usa HTTP sem timeout e pode bloquear dezenas de
-            # segundos. A API HTTPS responde mais rápido e tem limite explícito.
-            res = self.translate_mymemory_fast(t, source_lang, target_lang)
-        except Exception as mymemory_error:
+        errors = []
+        res = None
+        for attempt in range(3):
             try:
-                res = GoogleTranslator(source=source_lang, target=target_lang).translate(t)
-            except Exception as google_error:
-                print(
-                    f"[ui] Tradução indisponível: MyMemory={mymemory_error}; "
-                    f"Google={google_error}",
-                    flush=True,
-                )
-                res = "⚠ tradução indisponível"
+                res = self.translate_mymemory_fast(t, source_lang, target_lang)
+                break
+            except Exception as exc:
+                errors.append(f"MyMemory tentativa {attempt + 1}: {exc}")
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+
+        if res is None:
+            try:
+                res = self.translate_google_fast(t, source_lang, target_lang)
+            except Exception as exc:
+                errors.append(f"Google: {exc}")
+                print(f"[ui] Tradução indisponível: {'; '.join(errors)}", flush=True)
+                # Não grava um aviso como se fosse uma fala traduzida.
+                return
         QMetaObject.invokeMethod(
             self,
             "update_ui",
@@ -396,18 +401,40 @@ class TranslatorUI(QWidget):
     def translate_mymemory_fast(text, source_lang, target_lang):
         if source_lang == target_lang:
             return text.strip()
-        response = requests.get(
+        with requests.get(
             "https://api.mymemory.translated.net/get",
             params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
             timeout=(1.0, 3.0),
-        )
-        response.raise_for_status()
-        data = response.json()
+        ) as response:
+            response.raise_for_status()
+            data = response.json()
+        if data.get("responseStatus") not in (None, 200):
+            raise RuntimeError(f"MyMemory status {data.get('responseStatus')}")
+        if data.get("quotaFinished"):
+            raise RuntimeError("MyMemory informou que a cota terminou")
         result = (data.get("responseData", {}).get("translatedText") or "").strip()
         if not result:
             raise RuntimeError("MyMemory não retornou uma tradução")
         if result.casefold() == text.strip().casefold():
             raise RuntimeError("MyMemory retornou o texto original")
+        return result
+
+    @staticmethod
+    def translate_google_fast(text, source_lang, target_lang):
+        if source_lang == target_lang:
+            return text.strip()
+        with requests.get(
+            "https://translate.google.com/m",
+            params={"sl": source_lang, "tl": target_lang, "q": text},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=(1.0, 3.0),
+        ) as response:
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+        element = soup.find("div", {"class": "result-container"}) or soup.find("div", {"class": "t0"})
+        result = element.get_text(strip=True) if element else ""
+        if not result or result.casefold() == text.strip().casefold():
+            raise RuntimeError("Google não retornou uma tradução válida")
         return result
 
     @pyqtSlot(str, bool)
